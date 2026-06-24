@@ -13,7 +13,7 @@ defined( 'ABSPATH' ) || exit;
 
 class DT_Updater {
 
-    const GITHUB_USER = 'your-github-username';  // ← change this
+    const GITHUB_USER = 'DmytrivDev';  // ← change this
     const GITHUB_REPO = 'deepl-translator';
     const PLUGIN_SLUG = 'deepl-translator/deepl-translator.php';
     const CACHE_KEY   = 'dt_updater_release';

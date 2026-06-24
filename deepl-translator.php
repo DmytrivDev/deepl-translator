@@ -2,8 +2,11 @@
 /**
  * Plugin Name: DeepL Translator
  * Description: Translates entire pages via DeepL API: title, native and custom Gutenberg blocks (Polylang). Uses block.json translate hints for precise field handling.
- * Version:     2.0.0
- * Author:      DeepL Translator
+ * Version:     2.1.0
+ * Author:      DmytrivDev
+ * Author URI:  https://github.com/DmytrivDev
+ * GitHub Plugin URI: DmytrivDev/deepl-translator
+ * Requires PHP: 8.1
  * Text Domain: deepl-translator
  */
 
@@ -36,6 +39,7 @@ define( 'DT_SKIP_STRING_KEYS', [
 // ─────────────────────────────────────────────
 // MODULES
 // ─────────────────────────────────────────────
+require_once __DIR__ . '/dt-updater.php';
 require_once __DIR__ . '/dt-terms.php';
 
 // ─────────────────────────────────────────────

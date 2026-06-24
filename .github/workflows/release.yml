@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build plugin zip
+        run: |
+          mkdir -p build/deepl-translator
+          cp deepl-translator.php build/deepl-translator/
+          cp dt-admin.js          build/deepl-translator/
+          cp dt-terms.php         build/deepl-translator/
+          cp dt-terms-admin.js    build/deepl-translator/
+          cp dt-updater.php       build/deepl-translator/
+          cp README.md            build/deepl-translator/
+          cp CHANGELOG.md         build/deepl-translator/
+          cd build
+          zip -r ../deepl-translator.zip deepl-translator/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: deepl-translator.zip
+          generate_release_notes: true
