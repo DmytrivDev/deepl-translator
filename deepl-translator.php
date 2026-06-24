@@ -2,7 +2,7 @@
 /**
  * Plugin Name: DeepL Translator
  * Description: Translates entire pages via DeepL API: title, native and custom Gutenberg blocks (Polylang). Uses block.json translate hints for precise field handling.
- * Version:     2.1.0
+ * Version:     2.1.1
  * Author:      DmytrivDev
  * Author URI:  https://github.com/DmytrivDev
  * GitHub Plugin URI: DmytrivDev/deepl-translator
