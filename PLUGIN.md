@@ -4,34 +4,37 @@
 
 1. [Overview](#overview)
 2. [Installation](#installation)
-3. [Settings](#settings)
-4. [How It Works](#how-it-works)
-5. [Supported Block Types](#supported-block-types)
-6. [translate.json — Field Mapping](#translatejson--field-mapping)
+3. [Updating](#updating)
+4. [Settings](#settings)
+5. [How It Works](#how-it-works)
+6. [Supported Block Types](#supported-block-types)
+7. [translate.json — Field Mapping](#translatejson--field-mapping)
    - [File Structure](#file-structure)
    - [Translate Values](#translate-values)
    - [Simple Block Example](#simple-block-example)
    - [Repeater Block Example](#repeater-block-example)
    - [Child Block Example](#child-block-example)
-7. [Translation Logic](#translation-logic)
+8. [Translation Logic](#translation-logic)
    - [Strings](#strings)
    - [Rich Text](#rich-text)
    - [URLs](#urls)
    - [Post Objects](#post-objects)
    - [Repeaters](#repeaters)
    - [Defaults](#defaults)
-8. [Core Blocks](#core-blocks)
-9. [Theme Meta Fields](#theme-meta-fields)
-10. [Synced Patterns](#synced-patterns)
-11. [Adding a New Custom Block](#adding-a-new-custom-block)
-12. [Fallback Heuristics](#fallback-heuristics)
-13. [Known Limitations](#known-limitations)
+9. [Core Blocks](#core-blocks)
+10. [Theme Meta Fields](#theme-meta-fields)
+11. [Synced Patterns](#synced-patterns)
+12. [Taxonomy Term Translation](#taxonomy-term-translation)
+13. [Adding a New Custom Block](#adding-a-new-custom-block)
+14. [Fallback Heuristics](#fallback-heuristics)
+15. [GitHub Releases & Auto-Updater](#github-releases--auto-updater)
+16. [Known Limitations](#known-limitations)
 
 ---
 
 ## Overview
 
-**DeepL Translator** is a WordPress plugin that translates entire pages through the DeepL API using Polylang for language management. It handles:
+**DeepL Translator** is a WordPress plugin that translates entire pages and taxonomy terms through the DeepL API using Polylang for language management. It handles:
 
 - Page title and excerpt
 - All native Gutenberg core blocks (`core/paragraph`, `core/heading`, `core/list`, etc.)
@@ -42,17 +45,44 @@
 - Post object IDs — swaps for translated equivalents or removes if none found
 - Theme meta fields — auto-detected by theme text domain prefix
 - Synced patterns (`core/block`) — creates a translated pattern copy and swaps the `ref`
+- Taxonomy terms — name, slug, and theme-prefixed term meta for all public taxonomies
+- Works on newly created draft translations before they have content
 
 ---
 
 ## Installation
 
-1. Copy the plugin folder to `wp-content/plugins/deepl-translator/`
-2. The folder must contain two files:
-   - `deepl-translator.php`
-   - `dt-admin.js`
-3. Activate the plugin in **Plugins → Installed Plugins**
+### Via TGMPA (recommended for theme bundling)
+
+Add to your theme's required plugins list:
+
+```php
+array(
+    'name'     => 'DeepL Translator',
+    'slug'     => 'deepl-translator',
+    'source'   => 'https://github.com/DmytrivDev/deepl-translator/releases/latest/download/deepl-translator.zip',
+    'required' => true,
+),
+```
+
+### Manual
+
+1. Download `deepl-translator.zip` from the [latest release](https://github.com/DmytrivDev/deepl-translator/releases/latest)
+2. Go to **Plugins → Add New → Upload Plugin**
+3. Upload the zip and activate
 4. Go to **Settings → DeepL Translator** and enter your DeepL API key
+
+---
+
+## Updating
+
+Updates appear automatically in the standard **WordPress Admin → Updates** screen when a new release is published on GitHub. Click **Update now** — no manual steps needed.
+
+To force an immediate update check (bypasses the 12-hour cache):
+
+```
+wp-admin/update-core.php?force-check=1
+```
 
 ---
 
@@ -83,6 +113,8 @@ This tells the plugin to scan:
 
 ## How It Works
 
+### Pages
+
 When you click **🌐 Translate entire page** in the metabox:
 
 1. The plugin reads the original post (default language) content
@@ -97,7 +129,19 @@ When you click **🌐 Translate entire page** in the metabox:
 10. Translates theme meta fields
 11. Saves via `$wpdb->update()` directly (bypasses `wp_update_post()` double-encoding)
 
-The metabox appears **only on non-default language posts**. It also works on newly created draft translations before they have content.
+The metabox appears **only on non-default language posts**. It also works on newly created draft translations — the plugin saves the draft first (via the Gutenberg store), then runs translation, then reloads — all in one click.
+
+### Taxonomy Terms
+
+When you click **🌐 Translate entire term** in the term metabox:
+
+1. Reads the original term (default language)
+2. Translates the term name via DeepL
+3. Generates a slug from the translated name
+4. Translates all theme-prefixed term meta fields
+5. Saves name, slug, and meta to the target-language term
+
+For new terms (add form), the plugin creates the term via AJAX first, then translates it, then redirects to the edit screen — all in one click without manually saving first.
 
 ---
 
@@ -394,6 +438,44 @@ Patterns can be nested inside any container block — the plugin finds them at a
 
 ---
 
+## Taxonomy Term Translation
+
+The plugin adds a **🌐 Translate entire term** button to all public taxonomy edit and add screens.
+
+### Edit screen
+
+The button appears in a metabox at the bottom of the term edit form, only for non-default language terms that are linked to an original via Polylang.
+
+Clicking it translates:
+- **Term name** → via DeepL
+- **Slug** → generated from the translated name via `sanitize_title()`
+- **Theme-prefixed term meta** → same rules as post meta (copy numeric/empty, resolve URLs, translate everything else)
+
+### Add screen
+
+When Polylang creates a new term translation (URL contains `?from_tag=N&new_lang=xx`), the button appears immediately on the add form — no need to save first.
+
+Clicking it:
+1. Creates the term via AJAX (`wp_insert_term`)
+2. Sets the Polylang language (`pll_set_term_language`)
+3. Links it to the original (`pll_save_term_translations`)
+4. Translates name and meta
+5. Redirects to the edit screen with translated content already saved
+
+### Supported meta rules (term meta)
+
+| Value type | Action |
+|------------|--------|
+| Empty or numeric | Copy as-is |
+| Starts with `#` | Copy as-is (color or anchor) |
+| Internal URL | Resolve to target language; delete if not found |
+| Serialized array | Skip |
+| Everything else | Translate via DeepL |
+
+No configuration needed — works automatically for all public taxonomies using the active theme's text domain prefix.
+
+---
+
 ## Adding a New Custom Block
 
 **Step 1 — Create `translate.json`** in the block's folder alongside `block.json`:
@@ -402,14 +484,14 @@ Patterns can be nested inside any container block — the plugin finds them at a
 {
   "name": "myplugin/my-block",
   "attributes": {
-    "title":       { "translate": "rich" },
-    "description": { "translate": "rich" },
-    "buttonText":  { "translate": "string" },
-    "buttonLink":  { "translate": "url" },
-    "buttonLinkId":{ "translate": "postobject" },
-    "buttonType":  { "translate": "ignore" },
-    "imageId":     { "translate": "ignore" },
-    "imageUrl":    { "translate": "ignore" }
+    "title":        { "translate": "rich" },
+    "description":  { "translate": "rich" },
+    "buttonText":   { "translate": "string" },
+    "buttonLink":   { "translate": "url" },
+    "buttonLinkId": { "translate": "postobject" },
+    "buttonType":   { "translate": "ignore" },
+    "imageId":      { "translate": "ignore" },
+    "imageUrl":     { "translate": "ignore" }
   }
 }
 ```
@@ -482,6 +564,43 @@ It is strongly recommended to always provide a `translate.json` for custom block
 
 ---
 
+## GitHub Releases & Auto-Updater
+
+The plugin includes a built-in updater (`dt-updater.php`) that hooks into the standard WordPress update system.
+
+### How it works
+
+1. On every WordPress update check, the updater calls the GitHub Releases API
+2. Compares the latest release version with the installed version
+3. If a newer version exists — shows the standard WordPress update notification
+4. Clicking **Update now** downloads the release zip from GitHub and installs it automatically
+
+Release data is cached for 12 hours. To force an immediate check:
+```
+wp-admin/update-core.php?force-check=1
+```
+
+### Publishing a new release
+
+1. Update `Version:` in `deepl-translator.php`
+2. Commit and push
+3. Create and push a tag:
+   ```bash
+   git tag v2.x.x
+   git push origin v2.x.x
+   ```
+4. GitHub Actions automatically builds `deepl-translator.zip` and publishes the release
+
+All sites with the plugin installed will see the update notification on their next check.
+
+### Repository
+
+```
+https://github.com/DmytrivDev/deepl-translator
+```
+
+---
+
 ## Known Limitations
 
 - **Arrays of objects without `translate.json`** — the plugin attempts heuristic recursion but results may be incomplete. Always provide `translate.json` for blocks with repeaters.
@@ -490,4 +609,6 @@ It is strongly recommended to always provide a `translate.json` for custom block
 - **Polylang required** — the plugin depends on Polylang functions (`pll_get_post`, `pll_get_post_language`, etc.). Deactivating Polylang will prevent translation.
 - **Synced patterns** — Polylang does not natively manage `wp_block` post type. Translated patterns are created as standalone posts and linked manually. If Polylang's language list changes, existing links may need to be re-established.
 - **Post meta arrays** — serialized meta values are skipped. Only scalar (string/numeric) meta values are processed.
-- **Re-translating** — running the translator again on an already-translated page overwrites existing content. For patterns, if a translated version already exists it is reused without updating.
+- **Term meta arrays** — same as post meta: serialized values are skipped.
+- **Re-translating** — running the translator again on an already-translated page or term overwrites existing content. For patterns, if a translated version already exists it is reused without updating.
+- **GitHub API rate limit** — the updater uses unauthenticated requests (60/hour per IP). For private repos or high-traffic environments, add a GitHub token to the request headers.
