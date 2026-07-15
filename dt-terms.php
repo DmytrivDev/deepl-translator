@@ -298,13 +298,13 @@ function dt_ajax_translate_term(): void {
 
             // Empty or numeric → copy as-is immediately
             if ( $value === '' || is_numeric( $value ) ) {
-                update_term_meta( $term_id, $key, $value );
+                update_term_meta( $term_id, $key, wp_slash( $value ) );
                 continue;
             }
 
             // Starts with # → copy as-is (anchor or color)
             if ( str_starts_with( $value, '#' ) ) {
-                update_term_meta( $term_id, $key, $value );
+                update_term_meta( $term_id, $key, wp_slash( $value ) );
                 continue;
             }
 
@@ -313,7 +313,7 @@ function dt_ajax_translate_term(): void {
             if ( str_starts_with( $value, $home ) || str_starts_with( $value, '/' ) ) {
                 $resolved = dt_resolve_url( $value, $target_lang_slug );
                 if ( $resolved !== null ) {
-                    update_term_meta( $term_id, $key, $resolved );
+                    update_term_meta( $term_id, $key, wp_slash( $resolved ) );
                 } else {
                     delete_term_meta( $term_id, $key );
                 }
@@ -353,7 +353,8 @@ function dt_ajax_translate_term(): void {
             // Generate slug from translated name, respecting target language
             $term_update['slug'] = sanitize_title( $translated );
         } elseif ( $job['type'] === 'meta' ) {
-            update_term_meta( $term_id, $job['key'], $translated );
+            // update_term_meta() unslashes internally — wp_slash() keeps backslashes intact
+            update_term_meta( $term_id, $job['key'], wp_slash( $translated ) );
         }
     }
 
@@ -361,7 +362,8 @@ function dt_ajax_translate_term(): void {
 
     if ( ! empty( $term_update ) ) {
         $taxonomy   = get_term( $term_id )->taxonomy;
-        $wp_result  = wp_update_term( $term_id, $taxonomy, $term_update );
+        // wp_update_term() expects slashed data
+        $wp_result  = wp_update_term( $term_id, $taxonomy, wp_slash( $term_update ) );
 
         if ( is_wp_error( $wp_result ) ) {
             wp_send_json_error( $wp_result->get_error_message() );

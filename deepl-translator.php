@@ -2,7 +2,7 @@
 /**
  * Plugin Name: DeepL Translator
  * Description: Translates entire pages via DeepL API: title, native and custom Gutenberg blocks (Polylang). Uses block.json translate hints for precise field handling.
- * Version:     2.1.1
+ * Version:     2.1.6
  * Author:      DmytrivDev
  * Author URI:  https://github.com/DmytrivDev
  * GitHub Plugin URI: DmytrivDev/deepl-translator
@@ -35,6 +35,34 @@ define( 'DT_SKIP_STRING_KEYS', [
 	'linkTarget', 'arrowIcon', 'icon', 'iconPosition',
 	'videoType', 'mediaType', 'placeholder', 'sourceType',
 ] );
+
+// ─────────────────────────────────────────────
+// DEBUG
+// ─────────────────────────────────────────────
+/**
+ * Diagnostic logging. Enable by adding to wp-config.php:
+ *   define( 'DT_DEBUG', true );
+ *   define( 'WP_DEBUG', true );
+ *   define( 'WP_DEBUG_LOG', true );
+ * Then read wp-content/debug.log after running a translation.
+ */
+function dt_log( string $message ): void {
+	if ( defined( 'DT_DEBUG' ) && DT_DEBUG ) {
+		error_log( '[DeepL-Translator] ' . $message );
+	}
+}
+
+/**
+ * Classify escape state of serialized content: are \u003c backslashes intact?
+ */
+function dt_escape_state( string $content ): string {
+	$has_escaped = str_contains( $content, '\\u003c' );  // \u003c — correct
+	$has_bare    = (bool) preg_match( '/(?<!\\\\)u003c/', $content ); // u003c without backslash — corrupted
+	if ( $has_bare && $has_escaped ) return 'MIXED (partially corrupted)';
+	if ( $has_bare )                 return 'CORRUPTED (bare u003c, backslashes lost)';
+	if ( $has_escaped )              return 'OK (\\u003c intact)';
+	return 'no-escapes (no HTML in attrs)';
+}
 
 // ─────────────────────────────────────────────
 // MODULES
@@ -460,18 +488,42 @@ function dt_ajax_translate(): void {
 	// ── Translate theme meta fields ───────────────────────────────────────────
 	dt_translate_theme_meta( $original_id, $post_id, $target_lang_deepl, $target_lang_slug );
 
-	// ── Save — serialize_blocks() handles JSON escaping correctly ─────────────
+	// ── Save ──────────────────────────────────────────────────────────────────
 	$new_content = serialize_blocks( $blocks );
+	dt_log( sprintf( 'page #%d: saving (content: %s)', $post_id, dt_escape_state( $new_content ) ) );
+	dt_save_post_content( $post_id, $new_content, $post_update );
 
+	$saved_page = get_post( $post_id );
+	dt_log( sprintf(
+		'page #%d: content in DB after save: %s',
+		$post_id, $saved_page ? dt_escape_state( $saved_page->post_content ) : 'post missing'
+	) );
+
+	wp_send_json_success( 'Translation saved successfully.' );
+}
+
+/**
+ * Save translated post content directly via $wpdb.
+ *
+ * IMPORTANT — slashing invariant for this plugin:
+ * serialize_blocks() encodes attrs as JSON with \u003c / \u003e / \u0022
+ * escape sequences. These backslashes MUST reach the database intact.
+ *
+ * - $wpdb->update()  → does NOT unslash. Pass data as-is (this function).
+ * - wp_insert_post() / wp_update_post() / update_post_meta() /
+ *   update_term_meta() / wp_update_term() → DO unslash internally.
+ *   Always wrap their data in wp_slash().
+ *
+ * Never pass serialized block content through stripslashes()/wp_unslash().
+ */
+function dt_save_post_content( int $post_id, string $content, array $extra_fields = [] ): void {
 	global $wpdb;
 	$wpdb->update(
 		$wpdb->posts,
-		array_merge( [ 'post_content' => $new_content ], $post_update ),
+		array_merge( [ 'post_content' => $content ], $extra_fields ),
 		[ 'ID' => $post_id ]
 	);
 	clean_post_cache( $post_id );
-
-	wp_send_json_success( 'Translation saved successfully.' );
 }
 
 // ─────────────────────────────────────────────
@@ -496,6 +548,18 @@ function dt_sync_patterns( array &$blocks, string $target_lang_slug, string $tar
 			$translated_ref_id = function_exists( 'pll_get_post' )
 				? (int) pll_get_post( $ref_id, $target_lang_slug )
 				: 0;
+
+			if ( $translated_ref_id ) {
+				$existing = get_post( $translated_ref_id );
+				dt_log( sprintf(
+					'pattern ref=%d: REUSING existing translation #%d "%s" (status=%s, content: %s)',
+					$ref_id,
+					$translated_ref_id,
+					$existing->post_title ?? '?',
+					$existing->post_status ?? '?',
+					$existing ? dt_escape_state( $existing->post_content ) : 'post missing'
+				) );
+			}
 
 			if ( ! $translated_ref_id ) {
 				// Create translated pattern
@@ -564,15 +628,39 @@ function dt_create_translated_pattern( int $ref_id, string $target_lang_slug, st
 	$new_title = $original->post_title . ' [' . strtoupper( $target_lang_slug ) . ']';
 	$new_content = serialize_blocks( $pattern_blocks );
 
-	$new_id = wp_insert_post( [
+	// wp_insert_post() expects slashed data and runs wp_unslash() internally.
+	// Without wp_slash() the \u003c / \u0022 escapes produced by serialize_blocks()
+	// lose their backslashes and rich attrs of custom blocks render as literal
+	// "u003cem..." text. See dt_save_post_content() for the same rule.
+	dt_log( sprintf(
+		'pattern ref=%d: CREATING new translation "%s" (content before insert: %s)',
+		$ref_id, $new_title, dt_escape_state( $new_content )
+	) );
+
+	// Create the post with EMPTY content first, then write the real content
+	// via direct $wpdb->update(). wp_insert_post() runs the content through
+	// wp_unslash() and content_save_pre filters (kses, third-party plugins),
+	// any of which can strip the \u003c backslashes produced by
+	// serialize_blocks(). Bypassing them entirely makes the pattern save
+	// path identical to the page save path, which is known-good.
+	$new_id = wp_insert_post( wp_slash( [
 		'post_title' => $new_title,
-		'post_content' => $new_content,
+		'post_content' => '',
 		'post_status' => 'publish',
 		'post_type' => 'wp_block',
-	] );
+	] ) );
 
 	if ( ! $new_id || is_wp_error( $new_id ) )
 		return 0;
+
+	dt_save_post_content( $new_id, $new_content );
+
+	// Verify what actually landed in the database
+	$saved = get_post( $new_id );
+	dt_log( sprintf(
+		'pattern ref=%d: created #%d (content in DB after save: %s)',
+		$ref_id, $new_id, $saved ? dt_escape_state( $saved->post_content ) : 'post missing'
+	) );
 
 	// Set language and link translation via Polylang
 	if ( function_exists( 'pll_set_post_language' ) ) {
@@ -662,14 +750,14 @@ function dt_translate_theme_meta( int $original_id, int $post_id, string $target
 
 	// Copy fields
 	foreach ( $to_copy as $key => $value ) {
-		update_post_meta( $post_id, $key, $value );
+		update_post_meta( $post_id, $key, wp_slash( $value ) );
 	}
 
 	// Resolve URL fields
 	foreach ( $to_url as $key => $value ) {
 		$resolved = dt_resolve_url( $value, $target_lang_slug );
 		if ( $resolved !== null ) {
-			update_post_meta( $post_id, $key, $resolved );
+			update_post_meta( $post_id, $key, wp_slash( $resolved ) );
 		} else {
 			delete_post_meta( $post_id, $key );
 		}
@@ -686,7 +774,7 @@ function dt_translate_theme_meta( int $original_id, int $post_id, string $target
 			foreach ( $keys as $i => $key ) {
 				$translated = $translations[ $i ] ?? null;
 				if ( $translated !== null ) {
-					update_post_meta( $post_id, $key, $translated );
+					update_post_meta( $post_id, $key, wp_slash( $translated ) );
 				}
 			}
 		}
@@ -729,8 +817,8 @@ class DT_TranslationQueue {
 // ─────────────────────────────────────────────
 // 7. COLLECT: traverse blocks
 // ─────────────────────────────────────────────
-function dt_collect_blocks( array $blocks, array $path_prefix, DT_TranslationQueue $queue ): void {
-	foreach ( $blocks as $block_index => $block ) {
+function dt_collect_blocks( array &$blocks, array $path_prefix, DT_TranslationQueue $queue ): void {
+	foreach ( $blocks as $block_index => &$block ) {
 		$block_path = array_merge( $path_prefix, [ $block_index ] );
 		$block_name = $block['blockName'] ?? '';
 
@@ -820,6 +908,7 @@ function dt_collect_blocks( array $blocks, array $path_prefix, DT_TranslationQue
 			);
 		}
 	}
+	unset( $block );
 }
 
 /**
@@ -1164,7 +1253,9 @@ function dt_set_inner_html( array &$blocks, array $block_path, string $new_html,
 			if ( is_string( $piece ) && trim( $piece ) !== '' ) {
 				$ref['innerContent'][ $i ] = preg_replace(
 					'/<summary([^>]*)>.*?<\/summary>/si',
-					'<summary$1>' . $new_html . '</summary>',
+					// addcslashes: "\\" and "$" in translated text are special
+					// inside a preg_replace replacement string
+					'<summary$1>' . addcslashes( $new_html, '\\$' ) . '</summary>',
 					$piece
 				);
 				break;
@@ -1515,6 +1606,27 @@ function dt_value_looks_translatable( string $value ): bool {
 // ─────────────────────────────────────────────
 // 13. DEEPL API
 // ─────────────────────────────────────────────
+
+/**
+ * Harden cURL settings for DeepL requests only.
+ *
+ * - CONNECTTIMEOUT: WP/Requests defaults to 10s for the connect phase
+ *   regardless of the 'timeout' arg — too tight for flaky local networks.
+ * - IPRESOLVE V4: broken IPv6 routing is a classic cause of
+ *   "cURL error 28: Connection timed out" during the connect phase
+ *   (DNS returns AAAA, IPv6 is not routable, curl hangs until timeout).
+ *   Disable via: add_filter( 'dt_force_ipv4', '__return_false' );
+ */
+add_action( 'http_api_curl', function ( $handle, $parsed_args, $url ) {
+	if ( ! is_string( $url ) || stripos( $url, 'deepl.com' ) === false ) {
+		return;
+	}
+	curl_setopt( $handle, CURLOPT_CONNECTTIMEOUT, 30 );
+	if ( apply_filters( 'dt_force_ipv4', true ) && defined( 'CURL_IPRESOLVE_V4' ) ) {
+		curl_setopt( $handle, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4 );
+	}
+}, 10, 3 );
+
 function dt_deepl_translate( array $texts, string $target_lang ) {
 	$api_key = get_option( DT_OPTION_API_KEY, '' );
 	$api_type = get_option( DT_OPTION_API_TYPE, 'free' );
@@ -1527,7 +1639,7 @@ function dt_deepl_translate( array $texts, string $target_lang ) {
 		? 'https://api.deepl.com/v2/translate'
 		: 'https://api-free.deepl.com/v2/translate';
 
-	$response = wp_remote_post( $endpoint, [
+	$args = [
 		'timeout' => 60,
 		'headers' => [
 			'Authorization' => 'DeepL-Auth-Key ' . $api_key,
@@ -1538,10 +1650,43 @@ function dt_deepl_translate( array $texts, string $target_lang ) {
 			'tag_handling' => 'html',
 			'text' => $texts,
 		] ),
-	] );
+	];
 
-	if ( is_wp_error( $response ) )
-		return $response;
+	// Debug: if any INPUT string already contains u003 sequences, the source
+	// content in the DB is corrupted — the bug is upstream of translation.
+	foreach ( $texts as $i => $t ) {
+		if ( str_contains( $t, 'u003' ) ) {
+			dt_log( sprintf( 'DeepL INPUT[%d] contains u003 artifacts: %s', $i, mb_substr( $t, 0, 200 ) ) );
+		}
+	}
+
+	// Transport-level errors (timeouts, DNS hiccups, connection resets) are
+	// often transient — retry up to 3 times with a short backoff.
+	$max_attempts = (int) apply_filters( 'dt_deepl_retries', 3 );
+	$response = null;
+
+	for ( $attempt = 1; $attempt <= $max_attempts; $attempt++ ) {
+		$response = wp_remote_post( $endpoint, $args );
+
+		if ( ! is_wp_error( $response ) ) {
+			break;
+		}
+
+		if ( $attempt < $max_attempts ) {
+			sleep( $attempt ); // 1s, 2s backoff
+		}
+	}
+
+	if ( is_wp_error( $response ) ) {
+		return new WP_Error(
+			'deepl_network',
+			sprintf(
+				'%s (after %d attempts)',
+				$response->get_error_message(),
+				$max_attempts
+			)
+		);
+	}
 
 	$code = wp_remote_retrieve_response_code( $response );
 	$json = json_decode( wp_remote_retrieve_body( $response ), true );
@@ -1553,6 +1698,12 @@ function dt_deepl_translate( array $texts, string $target_lang ) {
 	}
 
 	$result = array_column( $json['translations'] ?? [], 'text' );
+
+	foreach ( $result as $i => $t ) {
+		if ( str_contains( $t, 'u003' ) ) {
+			dt_log( sprintf( 'DeepL OUTPUT[%d] contains u003 artifacts: %s', $i, mb_substr( $t, 0, 200 ) ) );
+		}
+	}
 
 	if ( count( $result ) !== count( $texts ) ) {
 		return new WP_Error( 'deepl_mismatch', 'DeepL returned an unexpected number of translations.' );
